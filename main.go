@@ -7,11 +7,12 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 )
 
 var filePath = "/tmp/dnsmasq.log.fifo"
-var outputFile = "/tmp/dnsmasq.log.parsed.fifo"
+var outputFile = "/tmp/dnsmasq.log.parsed"
 var latestReport = make(chan string, 1)
 var lastReport = ""
 
@@ -21,37 +22,71 @@ type AccessDetails struct {
 }
 
 func main() {
-	file, err := os.OpenFile(filePath, os.O_CREATE, os.ModeNamedPipe)
-	if err != nil {
-		fmt.Print(err)
-		return
-	}
-
 	accessMap := map[string]map[string]AccessDetails{}
 	// go writeToPipe(outputFile, latestReport)
 	go handleRequests()
 
-	reader := bufio.NewReader(file)
+	for {
+		err := createFifo(filePath)
+		if err != nil {
+			fmt.Printf("failed creating fifo: %s", err)
+			return
+		}
+		file, err := os.OpenFile(filePath, os.O_CREATE, os.ModeNamedPipe)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		fmt.Println("Starting processor")
+		startProcessor(*file, outputFile, accessMap)
+		file.Close()
+		time.Sleep(time.Second * 2)
+		fmt.Println("Restarting processor")
+	}
+}
+
+// func writeToPipe(file string, values <-chan string) {
+// 	for {
+// 		f, _ := os.OpenFile(file, os.O_WRONLY, 0600)
+// 		fmt.Printf("opened!\n")
+// 		v := <-values
+// 		fmt.Printf("Writing %s\n", v)
+// 		f.WriteString(v)
+// 		f.Sync()
+// 		f.Close()
+// 	}
+// }
+
+func startProcessor(inputFifo os.File, outputFile string, accessMap map[string]map[string]AccessDetails) {
+	reader := bufio.NewReader(&inputFifo)
+	processedLines := 0
 	for {
 		line, err := reader.ReadBytes('\n')
 		if err != nil {
-			fmt.Print(err)
+			fmt.Printf("%s\n", err)
 			break
 		}
 		lineStr := string(line)
 		if lineStr == "" {
-			fmt.Print("empty line")
+			fmt.Println("empty line")
 			continue
 		}
+		if processedLines%100 == 0 {
+			fmt.Printf("DNS exporter processed %d lines\n", processedLines)
+			processedLines += 1
+		}
 
-		split := strings.Split(lineStr, " ")
+		split := strings.Fields(lineStr)
 		if len(split) < 10 {
+			fmt.Printf("Split less than 10: %s\n", split)
 			continue
 		}
 		// Aug 23 00:55:42 dnsmasq[32386]: 1316 192.168.2.198/49122 query[A] viktorbarzin.me from 192.168.2.198
 		isQuery := strings.Contains(split[6], "query[A]")
 
 		if !isQuery {
+
+			// fmt.Printf("Not query: %s\n", split[6])
 			continue
 		}
 		now := time.Now()
@@ -83,18 +118,6 @@ func main() {
 	}
 }
 
-func writeToPipe(file string, values <-chan string) {
-	for {
-		f, _ := os.OpenFile(file, os.O_WRONLY, 0600)
-		fmt.Printf("opened!\n")
-		v := <-values
-		fmt.Printf("Writing %s\n", v)
-		f.WriteString(v)
-		f.Sync()
-		f.Close()
-	}
-}
-
 func report(accessMap map[string]map[string]AccessDetails) string {
 	str := strings.Builder{}
 	for src, val := range accessMap {
@@ -113,7 +136,7 @@ func shouldCleanUpLRU(accessMap map[string]map[string]AccessDetails) bool {
 			entries += 1
 		}
 	}
-	return entries > 100000
+	return entries > 500
 }
 
 func deleteLRU(accessMap map[string]map[string]AccessDetails) {
@@ -148,6 +171,7 @@ func deleteLRU(accessMap map[string]map[string]AccessDetails) {
 
 func handler(w http.ResponseWriter, r *http.Request) {
 	var report string
+	// fmt.Println("handling scrape request")
 	select {
 	case val := <-latestReport:
 		report = val
@@ -155,10 +179,18 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	case <-time.After(100 * time.Millisecond):
 		report = lastReport
 	}
+	// fmt.Printf("Returning report %s\n", report)
 	fmt.Fprintf(w, report)
 }
 
 func handleRequests() {
+	fmt.Println("Starting web handler")
 	http.HandleFunc("/", handler)
 	log.Fatal(http.ListenAndServe(":9101", nil))
+}
+
+func createFifo(filePath string) error {
+	os.Remove(filePath)
+	err := syscall.Mkfifo(filePath, 0666)
+	return err
 }
