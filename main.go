@@ -3,16 +3,22 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 )
 
-var filePath = "/tmp/dnsmasq.log.fifo"
-var outputFile = "/tmp/dnsmasq.log.parsed"
+const (
+	dhcpLeasesFile = "/tmp/dhcp.leases"
+	outputFile     = "/tmp/dnsmasq.log.parsed"
+	filePath       = "/tmp/dnsmasq.log.fifo"
+)
+
 var latestReport = make(chan string, 1)
 var lastReport = ""
 
@@ -119,10 +125,27 @@ func startProcessor(inputFifo os.File, outputFile string, accessMap map[string]m
 }
 
 func report(accessMap map[string]map[string]AccessDetails) string {
+	ipLeases := getDHCPLeases()
 	str := strings.Builder{}
 	for src, val := range accessMap {
 		for host, accessDetails := range val {
-			str.WriteString(fmt.Sprintf("%s,%s,%d\n", src, host, accessDetails.TimesAccessed))
+			lease, ok := ipLeases[src]
+			if !ok {
+				// fmt.Printf("No lease for %s in %+v", src, ipLeases)
+				// fmt.Printf("Error opening leases file: %s", err)
+			}
+			kek := fmt.Sprintf("%s,%s,%d,%s,%s,%s,%d\n",
+				src,
+				host,
+				accessDetails.TimesAccessed,
+				lease.ClientMac,
+				lease.ClientHostname,
+				lease.ClientUID,
+				lease.ExpirationTime,
+			)
+			str.WriteString(
+				kek,
+			)
 
 		}
 	}
@@ -193,4 +216,53 @@ func createFifo(filePath string) error {
 	os.Remove(filePath)
 	err := syscall.Mkfifo(filePath, 0666)
 	return err
+}
+
+type DHCPLease struct {
+	ExpirationTime int
+	ClientMac      string
+	ClientIP       string
+	ClientHostname string
+	ClientUID      string
+}
+
+func getDHCPLeases() map[string]DHCPLease {
+	// return map[ip address]DHCPLease
+	dhcpLeasesBytes, err := ioutil.ReadFile(dhcpLeasesFile)
+	if err != nil {
+		return map[string]DHCPLease{}
+	}
+	result := map[string]DHCPLease{}
+
+	for _, line := range strings.Split(string(dhcpLeasesBytes), "\n") {
+		if line == "" {
+			continue
+		}
+		// line format:
+		// <timestamp of lease expiration> <client mac> <client ip> <client name?> <client uid?>
+		// 1631097413 b8:27:eb:de:b2:36 192.168.2.219 raspberrypi 01:b8:27:eb:de:b2:36
+		splitLine := strings.Fields(line)
+		if len(splitLine) != 5 {
+			fmt.Printf("Invalid line in dhcp leases file (%s): %s", dhcpLeasesFile, line)
+			continue
+		}
+		expirationTime, err := strconv.Atoi(splitLine[0])
+		if err != nil {
+			fmt.Printf("Invalid expiration time, skipping line: %s", line)
+			continue
+		}
+
+		clientMac := splitLine[1]
+		clientIP := splitLine[2]
+		clientName := splitLine[3]
+		clientUID := splitLine[4]
+		result[clientIP] = DHCPLease{
+			ExpirationTime: expirationTime,
+			ClientMac:      clientMac,
+			ClientIP:       clientIP,
+			ClientHostname: clientName,
+			ClientUID:      clientUID,
+		}
+	}
+	return result
 }
