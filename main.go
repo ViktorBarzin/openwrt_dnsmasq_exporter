@@ -159,7 +159,7 @@ func shouldCleanUpLRU(accessMap map[string]map[string]AccessDetails) bool {
 			entries += 1
 		}
 	}
-	return entries > 500
+	return entries > 1000
 }
 
 func deleteLRU(accessMap map[string]map[string]AccessDetails) {
